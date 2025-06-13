@@ -1,0 +1,300 @@
+class PeerService {
+    constructor() {
+        if (!this.peer) {
+            this.peer = new RTCPeerConnection({
+                iceServers: [
+                    { urls: "stun:stun.l.google.com:19302" },
+                    { urls: "stun:stun1.l.google.com:19302" },
+                    // Add more STUN servers for better reliability
+                    { urls: "stun:stun2.l.google.com:19302" },
+                    { urls: "stun:stun3.l.google.com:19302" }
+                ],
+                iceTransportPolicy: 'all',
+                iceCandidatePoolSize: 10,
+                // Add bundle policy for better compatibility
+                bundlePolicy: 'max-bundle',
+                rtcpMuxPolicy: 'require'
+            });
+            
+            // Enhanced logging
+            this.peer.onicecandidate = (event) => {
+                if (event.candidate) {
+                    console.log('ICE candidate generated:', {
+                        type: event.candidate.type,
+                        protocol: event.candidate.protocol,
+                        address: event.candidate.address || 'hidden',
+                        port: event.candidate.port
+                    });
+                } else {
+                    console.log('ICE gathering complete');
+                }
+            };
+
+            this.peer.oniceconnectionstatechange = () => {
+                console.log('ICE connection state changed:', this.peer.iceConnectionState);
+                
+                // Handle connection failures
+                if (this.peer.iceConnectionState === 'failed') {
+                    console.log('ICE connection failed, attempting restart...');
+                    this.peer.restartIce();
+                }
+            };
+
+            this.peer.onconnectionstatechange = () => {
+                console.log('Connection state changed:', this.peer.connectionState);
+            };
+
+            this.peer.onsignalingstatechange = () => {
+                console.log('Signaling state changed:', this.peer.signalingState);
+            };
+
+            // Add track event logging
+            this.peer.ontrack = (event) => {
+                console.log('Track event received in peer service:', {
+                    kind: event.track?.kind,
+                    id: event.track?.id,
+                    streams: event.streams?.length || 0
+                });
+            };
+
+            // Add data channel state logging
+            this.peer.ondatachannel = (event) => {
+                console.log('Data channel received:', event.channel.label);
+            };
+
+            // Queue for pending ICE candidates
+            this.pendingIceCandidates = [];
+        }
+    }
+
+    async getOffer() {
+        try {
+            console.log('Creating offer...');
+            console.log('Current signaling state:', this.peer.signalingState);
+            console.log('Senders before offer:', this.peer.getSenders().length);
+            
+            const offer = await this.peer.createOffer({
+                offerToReceiveAudio: true,
+                offerToReceiveVideo: true
+            });
+            
+            console.log('Offer created:', {
+                type: offer.type,
+                sdpLength: offer.sdp.length,
+                hasVideo: offer.sdp.includes('m=video'),
+                hasAudio: offer.sdp.includes('m=audio')
+            });
+            
+            console.log('Setting local description (offer)...');
+            await this.peer.setLocalDescription(offer);
+            console.log('Local description set successfully, state:', this.peer.signalingState);
+            
+            return offer;
+        } catch (err) {
+            console.error("Create offer error:", err);
+            throw err;
+        }
+    }
+
+    async getAnswer(offer) {
+        try {
+            console.log('Received offer:', {
+                type: offer.type,
+                sdpLength: offer.sdp?.length || 0,
+                hasVideo: offer.sdp?.includes('m=video') || false,
+                hasAudio: offer.sdp?.includes('m=audio') || false
+            });
+            
+            console.log('Current signaling state before setting remote desc:', this.peer.signalingState);
+            console.log('Setting remote description (offer)...');
+            
+            await this.peer.setRemoteDescription(new RTCSessionDescription(offer));
+            console.log('Remote description set, new state:', this.peer.signalingState);
+            
+            // Process any pending ICE candidates now that remote description is set
+            await this.processPendingIceCandidates();
+            
+            console.log('Creating answer...');
+            console.log('Senders before creating answer:', this.peer.getSenders().length);
+            
+            const answer = await this.peer.createAnswer();
+            console.log('Answer created:', {
+                type: answer.type,
+                sdpLength: answer.sdp.length,
+                hasVideo: answer.sdp.includes('m=video'),
+                hasAudio: answer.sdp.includes('m=audio')
+            });
+            
+            console.log('Setting local description (answer)...');
+            await this.peer.setLocalDescription(answer);
+            console.log('Answer set successfully, final state:', this.peer.signalingState);
+            
+            return answer;
+        } catch (err) {
+            console.error("Create answer error:", err);
+            throw err;
+        }
+    }
+
+    // FIXED: This method name was misleading - it should set remote description
+    async setRemoteDescription(ans) {
+        try {
+            console.log('Setting remote description (answer)...');
+            console.log('Answer details:', {
+                type: ans.type,
+                sdpLength: ans.sdp?.length || 0,
+                hasVideo: ans.sdp?.includes('m=video') || false,
+                hasAudio: ans.sdp?.includes('m=audio') || false
+            });
+            console.log('Current signaling state:', this.peer.signalingState);
+            
+            await this.peer.setRemoteDescription(new RTCSessionDescription(ans));
+            console.log('Remote description (answer) set successfully, state:', this.peer.signalingState);
+            
+            // Process any pending ICE candidates
+            await this.processPendingIceCandidates();
+            
+        } catch (err) {
+            console.error("Set remote description error:", err);
+            throw err;
+        }
+    }
+
+    async addIceCandidate(candidate) {
+        try {
+            console.log('Attempting to add ICE candidate:', {
+                type: candidate.type || 'unknown',
+                protocol: candidate.protocol || 'unknown',
+                hasRemoteDesc: !!this.peer.remoteDescription,
+                signalingState: this.peer.signalingState
+            });
+
+            if (this.peer.remoteDescription && this.peer.remoteDescription.type) {
+                console.log('Adding ICE candidate immediately');
+                await this.peer.addIceCandidate(new RTCIceCandidate(candidate));
+                console.log('ICE candidate added successfully');
+            } else {
+                console.log('Remote description not ready, queuing candidate');
+                this.pendingIceCandidates.push(candidate);
+                console.log('Pending candidates queue size:', this.pendingIceCandidates.length);
+            }
+        } catch (err) {
+            console.error("Error adding ICE candidate:", err);
+            // Don't throw the error, as failed ICE candidates shouldn't break the connection
+        }
+    }
+
+    // Process queued ICE candidates
+    async processPendingIceCandidates() {
+        if (this.pendingIceCandidates.length > 0) {
+            console.log('Processing', this.pendingIceCandidates.length, 'pending ICE candidates');
+            
+            for (const candidate of this.pendingIceCandidates) {
+                try {
+                    await this.peer.addIceCandidate(new RTCIceCandidate(candidate));
+                    console.log('Processed pending ICE candidate:', candidate.type);
+                } catch (err) {
+                    console.error('Error processing pending ICE candidate:', err);
+                }
+            }
+            
+            this.pendingIceCandidates = [];
+            console.log('All pending ICE candidates processed');
+        }
+    }
+
+    // Helper method to get connection stats
+    async getStats() {
+        try {
+            const stats = await this.peer.getStats();
+            return stats;
+        } catch (err) {
+            console.error("Error getting stats:", err);
+            return null;
+        }
+    }
+
+    // Enhanced connection status check
+    isConnected() {
+        const iceState = this.peer.iceConnectionState;
+        const connectionState = this.peer.connectionState;
+        const signalingState = this.peer.signalingState;
+        
+        console.log('Connection status check:', {
+            iceState,
+            connectionState,
+            signalingState
+        });
+        
+        return (iceState === 'connected' || iceState === 'completed') &&
+               (connectionState === 'connected') &&
+               (signalingState === 'stable');
+    }
+
+    // Get detailed connection info
+    getConnectionInfo() {
+        return {
+            iceConnectionState: this.peer.iceConnectionState,
+            connectionState: this.peer.connectionState,
+            signalingState: this.peer.signalingState,
+            iceGatheringState: this.peer.iceGatheringState,
+            senders: this.peer.getSenders().length,
+            receivers: this.peer.getReceivers().length,
+            pendingCandidates: this.pendingIceCandidates.length
+        };
+    }
+
+    // Method to restart ICE connection
+    async restartIce() {
+        try {
+            console.log('Restarting ICE connection...');
+            this.peer.restartIce();
+        } catch (err) {
+            console.error('Error restarting ICE:', err);
+        }
+    }
+
+    // Enhanced cleanup method
+    close() {
+        if (this.peer) {
+            console.log('Closing peer connection...');
+            
+            // Clear pending candidates
+            this.pendingIceCandidates = [];
+            
+            // Close the connection
+            this.peer.close();
+            
+            // Reset the peer connection
+            this.peer = null;
+            
+            console.log('Peer connection closed');
+        }
+    }
+
+    // Method to recreate peer connection if needed
+    recreate() {
+        console.log('Recreating peer connection...');
+        this.close();
+        // The constructor will be called again when peer is accessed
+        this.constructor();
+    }
+
+    // Debug method to log current state
+    debugState() {
+        const info = this.getConnectionInfo();
+        console.log('=== PEER CONNECTION DEBUG STATE ===');
+        console.log('ICE Connection State:', info.iceConnectionState);
+        console.log('Connection State:', info.connectionState);
+        console.log('Signaling State:', info.signalingState);
+        console.log('ICE Gathering State:', info.iceGatheringState);
+        console.log('Senders:', info.senders);
+        console.log('Receivers:', info.receivers);
+        console.log('Pending ICE Candidates:', info.pendingCandidates);
+        console.log('Has Remote Description:', !!this.peer.remoteDescription);
+        console.log('Has Local Description:', !!this.peer.localDescription);
+        console.log('=====================================');
+    }
+}
+
+export default new PeerService();
